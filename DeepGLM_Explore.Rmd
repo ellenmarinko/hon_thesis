@@ -1,0 +1,130 @@
+---
+title: "Deep GLM"
+author: "Ellen"
+date: "22/07/2018"
+output: pdf_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+This is an example script of the code required to run a DeepGLM model. 
+
+DEEP GLM Packages:
+```{r}
+#install.packages("deepglm_0.0.0.9000.zip", repos = NULL, type="win.binary") 
+library(deepglm)
+```
+
+Data Matrix:  
+```{r}
+#Create matrix
+data_matrix= data.matrix(dat, rownames.force = NA)
+
+#scale dataset except resonse
+data_matrix[,-1] <- scale(data_matrix[,-1])
+
+#Randomly sample 20000 observations for test
+ind <- sample(NROW(data_matrix),20000)
+
+#split into test and train
+data_matrix_TRAIN <- data_matrix[-ind,]
+data_matrix_TEST <- data_matrix[ind,]
+
+#extract x matrix for test and train
+X <- data_matrix_TRAIN[,2:26]
+Xtest <- data_matrix_TEST[,2:26]
+
+#extract y values for test and train
+ytest <- data_matrix_TEST[,1]
+y <- data_matrix_TRAIN[,1]
+```
+
+
+```{r}
+mdl1 <-deepGLMfit(X,y, Lrate=0.01, Network=c(29,29) , BatchSize=80688,
+           S=10, LRateFactor=10000, Momentum=0.6, Patience=2000,
+           MaxEpoch = 3000, Verbose=10, Distribution='binomial',
+           WindowSize=100, Seed=NaN, Intercept=TRUE)
+
+#X = predictor variables X, specified as n x p matrix
+#y = response (failure or non failure)
+
+#Lrate = fixed learning rate is used for training
+
+#network = neural network structure
+
+#BatchSize = size of batch used for each training iteration
+
+#S = number of samples needed for monte carlo apporx of gradient of lower bound?
+
+#Lrate factor: LrateFactor=100 means that after the first 100 iterations,learning rate will be multiplied with 100/t in each iteration, where t is the current number of iterations
+
+#Momentum: he momentum determines the contribution of the gradient step from the previous iteration to the current iteration of training. It must be a value between 0 and 1, where 0 will give no contribution from the previous step, and 1 will give a maximal contribution from the previous step
+
+#Epoch: An epoch is defined as the number of iterations needed for optimization algorithm to scan entire training dat
+
+```
+
+
+Prediction:
+```{r}
+## Make point prediction on test data using deepGLMpredict
+print('----------------Prediction---------------')
+Pred <- deepGLMpredict(mdl1,Xtest,y=ytest)
+cat('Classification rate of trained deep GLM on Xtest set is: ',(Pred$accuracy)*100,'%\n')
+
+#accuracy:	Classification rate of trained deepGLM classifier on X. for binary responses
+#81.63%
+
+```
+
+Shrinkage Plots:
+Plots of the shrinkage parameters γj over iterations. The shrinkage parameters
+w.r.t the irrelevant variables keep increasing, while the ones w.r.t the relevant
+variables keep decreasing.
+
+```{r}
+f <-matplot(1:NCOL(mdl1$out.shrinkage), t(mdl1$out.shrinkage), type="l")
+```
+
+```{r}
+save.image(file="Output20thaugust_TEST.RData")
+```
+
+```{r}
+df <-as.data.table(mdl1$out.shrinkage)
+df_s <-subset(df, select=c("V3000"))
+print(df_s) # Shrinkage parameters of each variable at last iteration. 
+```
+
+```{r}
+#Variable Indexs to match row names to:
+df_s$variable_index <- row.names(df_s)
+df_s
+
+#Rank data by shrinkage parameters:
+setkey(df_s, V3000)
+df_s<-as.data.frame(df_s)
+
+dattest <-as.data.table(colnames(dat[,-1]))
+dattest$variable_index <- row.names(dattest)
+
+df_tt <- merge(dattest, df_s, by = "variable_index")
+
+print(df_tt)
+df_tt$Variable_Name <- df_tt$V1 
+df_tt$Shrinkage_Coef <- df_tt$V3000
+df_tt$V3000 = NULL
+df_tt$V1 = NULL
+df_tt$variable_index = NULL
+setkey(df_tt, Shrinkage_Coef)
+print(df_tt)
+df_tt <- as.data.frame(df_tt)
+
+```
+
+
+
+
+
+
