@@ -1,0 +1,178 @@
+---
+title: "B-Spline_edit"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+This script outlines the model fit to the preventative maintenance data. We begin the model specification by creating the design matrix for the spline basis, using the readily available functions in R to generate the B-splines (r package: Splines). We build the design matrix which includes an intercept column using the BSpline function, with 10 equidistant knots. T
+
+```{r,include=FALSE}
+library(bayesplot)
+library(ggplot2)
+library(rstan)
+library(lattice)
+library(data.table)
+library(sfsmisc)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+```
+
+Load Data
+```{r}
+#LOAD IN DATA
+costs_rags <- read.csv("Preventative_data_UPDATED.csv", header=TRUE)
+
+costs_rags$X = NULL
+
+#SMALLER SAMPLE SIZE
+#costs_rags <- costs_rags[sample(nrow(costs_rags),300),]
+
+x1 <- do.call(c, costs_rags[2:12]) #1 Year
+y <- do.call(c, costs_rags[15:25]) #response - rag events
+
+y1test<-as.data.frame(y)
+
+station <- factor(rep(costs_rags$FL, 11))
+temp_df <- data.frame(x = x1, y = y, station=station)
+temp_df <- temp_df[order(temp_df$x),]
+x1 <- temp_df$x
+y <- temp_df$y
+station <- temp_df$station
+```
+
+
+```{r}
+data.in <- list(
+  N = length(y),
+  y = y,
+  x_vec = u.log(x1),
+  group = as.numeric(station),
+  N_group = nlevels(station)
+)
+```
+
+
+
+```{r}
+# b-splines
+knot_num <- 10 
+
+#equidistant knot locations
+knot_locations <- seq(from = min(u.log(x1)), to = max(u.log(x1)), length = knot_num+2)[-c(1,knot_num+2)]
+
+z_mat <- splines::bs(
+  x = data.in$x_vec,
+  knots = knot_locations
+)
+
+#X matrix including intercept
+x_mat <- cbind(
+  1,
+  data.in$x_vec
+)
+```
+
+Load Data in stan
+```{r}
+stan_dat_in <- list(
+  N = length(y),
+  y = y,
+  n_group = length(unique(station)),
+  group_vec = as.numeric(station),
+  n_k = ncol(z_mat),
+  x_mat = x_mat,
+  z_mat = z_mat
+)
+
+```
+
+B spline + Zero Inflated Model
+```{stan output.var="spline"}
+data {
+  int<lower=0> N; // number of observations
+  int<lower=0> y[N]; // rag events
+
+  int<lower=0> n_group;
+  int<lower=0> group_vec [N];
+  int<lower=0> n_k;
+
+  matrix [N, 2]  x_mat;
+  matrix [N, n_k] z_mat;
+
+}
+
+parameters {
+  real<lower=0, upper=1> theta; //mixing parameter (mixture weight)
+  real beta_zero [n_group];
+  real beta_one;
+  real mu_h;
+  real sigma_h;
+
+  vector [n_k] spline_u;
+  real<lower = 0> sigma_sp;
+  real<lower = 0> phi;
+}
+
+transformed parameters{
+  vector<lower=0>[N] lambda;
+  matrix [n_group, 2] beta_mat;
+
+  for (ii in 1:n_group) {
+    beta_mat[ii, 1] = beta_zero[ii];
+    beta_mat[ii, 2] = beta_one;
+  }
+
+  for (ii in 1:N) {
+    lambda[ii] = exp(x_mat[ii, ] * beta_mat[group_vec[ii], ]' + z_mat[ii, ] * spline_u);
+  }
+
+}
+
+model {
+ for (n in 1:N) {
+    if (y[n] == 0)
+    target += log_sum_exp(bernoulli_lpmf(1 | theta),
+                          bernoulli_lpmf(0 | theta) + neg_binomial_2_lpmf(0 | lambda[n], phi));
+   else
+    target += bernoulli_lpmf(0 | theta) + neg_binomial_2_lpmf(y[n] | lambda[n], phi);
+  }
+
+  // random intercept and common slope parameters
+  beta_one ~ normal(0, 1);
+  beta_zero ~ normal(mu_h, sigma_h);
+  
+  //hierarchial priors 
+  mu_h ~ normal(0,1);
+  sigma_h ~ cauchy(0,5);
+  phi ~ cauchy(0,5);
+
+  // smoothing prior for spline parameters
+  spline_u[1] ~ normal(0, 1);
+  for (ii in 2:n_k) {
+    spline_u[ii] ~ normal(spline_u[ii-1], sigma_sp);
+  }
+  sigma_sp ~ normal(0, 1);
+}
+
+```
+
+Sampling
+```{r}
+model_fit <- sampling(spline,
+  data = stan_dat_in
+)
+```
+
+We explain this model, block by block:
+Data block: The data block declares the data that must be input into the Stan program. In this case, we will input the data via a call from R, which includes the constructed b-spline design matrix. 
+	
+Parameters block: The parameters block introduces all the unknown quantities that Stan will estimate. It is noted that model parameters and data that require constrained support are specified with appropriate constraints in the parameter declaration block. For example the mixing parameter $\theta$ is a probability thus bounded between 0 and 1. If constraints are absent, sampling will either slow down or stop altogether based on whether the initial values satisfy the constraints.(Stan Reference Manual, 2017)
+
+Transformed Parameters Block: Transformed parameters are functions of data and parameters. It is in this section we specify the linear predictor of the mean, given the spline function, random intercept and linear slope terms. 
+	
+Model Block: The model block is where the log-posterior density is computed.This specifies the probability function of the Zero inflated negative binomial model which can be implemented directly in Stan. The log\_sum\_exp(lp1,lp2) function adds the log probabilities on the linear scale and it is defined to be equal to log(exp(lp1) + exp(lp2)), but is more arithmetically stable and faster. This block also includes all prior specification of parameters and hyper-parameters of the hierarchical model.
+	 
